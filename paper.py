@@ -1,33 +1,41 @@
-import asyncio, websockets, json, telegram, requests, logging, sys
+import asyncio
+import websockets
+import json
+import telegram
+import requests
 import pandas as pd
 import pandas_ta as ta
 
 # ==================== CONFIGURATION ====================
 SYMBOL = 'SOLUSDT'
-SIGNAL_TIMEFRAME = '1h'  # The trend we follow
-CHECK_INTERVAL = '5m'    # How often we "repaint" the indicator (5 mins)
-TELEGRAM_TOKEN = '8050135427:AAFNQYFpU8lMQ-reJlvLnPYFKc8pyPrHblE'
+SIGNAL_TIMEFRAME = '1h'
+CHECK_INTERVAL = '5m'
+TELEGRAM_TOKEN = '8349229275:AAGNWV2A0_Pf9LhlwZCczeBoMcUaJL2shFg'
 CHAT_ID = '1950462171'
 
-stats = {"balance": 1000.0, "risk_percent": 0.02, "wins": 0, "losses": 0, "total_trades": 0}
+stats = {
+    "balance": 1000.0, 
+    "risk_percent": 0.02, 
+    "wins": 0, 
+    "losses": 0, 
+    "total_trades": 0,
+    "trailed_trades": 0 
+}
+
 active_trade = None
 bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
 # ==================== DATA ENGINE ====================
 
 async def fetch_indicators():
-    """Fetches 1H candles and calculates indicators to sync with Binance."""
     try:
         url = "https://api.binance.com/api/v3/klines"
         params = {'symbol': SYMBOL, 'interval': SIGNAL_TIMEFRAME, 'limit': 100}
         resp = requests.get(url, params=params, timeout=10)
         df = pd.DataFrame(resp.json(), columns=['ts', 'o', 'h', 'l', 'c', 'v', 'ts_e', 'q', 'n', 'tb', 'tq', 'i'])
         df['close'] = df['c'].astype(float)
-        
-        # Calculate RSI 14 and EMA 9 of RSI
         rsi = ta.rsi(df['close'], length=14)
         rsi_ema = ta.ema(rsi, length=9)
-        
         return rsi.iloc[-1], rsi_ema.iloc[-1], rsi.iloc[-2], rsi_ema.iloc[-2]
     except Exception as e:
         print(f"Sync Error: {e}")
@@ -36,28 +44,53 @@ async def fetch_indicators():
 # ==================== TRADE MANAGEMENT ====================
 
 async def monitor_trade(price):
-    global active_trade
+    global active_trade, stats
     if not active_trade: return
 
     risk_dist = active_trade['entry'] - active_trade['initial_sl']
-    # Current Real-Time RR
     rr_ratio = (price - active_trade['entry']) / risk_dist if risk_dist > 0 else 0
 
-    # STAGE 1: Hit 1.5R -> SL to +0.5R
+    # NEW 6-STAGE LADDER LOGIC
+    # Stage 1: Hit 1.5R -> Trail to 0.8R
     if rr_ratio >= 1.5 and active_trade['trail_level'] < 1:
-        active_trade['sl'] = active_trade['entry'] + (risk_dist * 0.5)
+        active_trade['sl'] = active_trade['entry'] + (risk_dist * 0.8)
         active_trade['trail_level'] = 1
-        await bot.send_message(CHAT_ID, f"🛡️ STAGE 1: SL Trailed to +0.5R (${active_trade['sl']:.2f})")
+        stats['trailed_trades'] += 1
+        await bot.send_message(CHAT_ID, f"🛡️ STAGE 1: Hit 1.5R | SL Trailed to +0.8R (${active_trade['sl']:.2f})")
 
-    # STAGE 2: Hit 2.2R -> SL to +1.4R
+    # Stage 2: Hit 2.2R -> Trail to 1.4R
     elif rr_ratio >= 2.2 and active_trade['trail_level'] < 2:
         active_trade['sl'] = active_trade['entry'] + (risk_dist * 1.4)
         active_trade['trail_level'] = 2
-        await bot.send_message(CHAT_ID, f"🛡️ STAGE 2: SL Trailed to +1.4R (${active_trade['sl']:.2f})")
+        await bot.send_message(CHAT_ID, f"🛡️ STAGE 2: Hit 2.2R | SL Trailed to +1.4R (${active_trade['sl']:.2f})")
 
-    # STAGE 3: EXIT AT 3.0R
-    if rr_ratio >= 3.0:
-        await close_trade(price, "🎯 FINAL TARGET REACHED (3.0R)")
+    # Stage 3: Hit 3.0R -> Trail to 2.2R
+    elif rr_ratio >= 3.0 and active_trade['trail_level'] < 3:
+        active_trade['sl'] = active_trade['entry'] + (risk_dist * 2.2)
+        active_trade['trail_level'] = 3
+        await bot.send_message(CHAT_ID, f"🛡️ STAGE 3: Hit 3.0R | SL Trailed to +2.2R (${active_trade['sl']:.2f})")
+
+    # Stage 4: Hit 3.8R -> Trail to 3.0R
+    elif rr_ratio >= 3.8 and active_trade['trail_level'] < 4:
+        active_trade['sl'] = active_trade['entry'] + (risk_dist * 3.0)
+        active_trade['trail_level'] = 4
+        await bot.send_message(CHAT_ID, f"🛡️ STAGE 4: Hit 3.8R | SL Trailed to +3.0R (${active_trade['sl']:.2f})")
+
+    # Stage 5: Hit 4.5R -> Trail to 3.8R
+    elif rr_ratio >= 4.5 and active_trade['trail_level'] < 5:
+        active_trade['sl'] = active_trade['entry'] + (risk_dist * 3.8)
+        active_trade['trail_level'] = 5
+        await bot.send_message(CHAT_ID, f"🛡️ STAGE 5: Hit 4.5R | SL Trailed to +3.8R (${active_trade['sl']:.2f})")
+
+    # Stage 6: Hit 5.2R -> Trail to 4.4R
+    elif rr_ratio >= 5.2 and active_trade['trail_level'] < 6:
+        active_trade['sl'] = active_trade['entry'] + (risk_dist * 4.4)
+        active_trade['trail_level'] = 6
+        await bot.send_message(CHAT_ID, f"🛡️ STAGE 6: Hit 5.2R | SL Trailed to +4.4R (${active_trade['sl']:.2f})")
+
+    # EXIT LOGIC: Hit 6.0R or Trail Hit
+    if rr_ratio >= 6.0:
+        await close_trade(price, "🎯 FINAL TARGET REACHED (6.0R)")
     elif price <= active_trade['sl']:
         reason = "🛡️ TRAILING STOP" if active_trade['trail_level'] > 0 else "🛑 STOP LOSS"
         await close_trade(price, reason)
@@ -73,10 +106,12 @@ async def close_trade(exit_price, reason):
     if pnl_cash > 0: stats['wins'] += 1
     else: stats['losses'] += 1
     
+    win_rate = (stats['wins'] / stats['total_trades']) * 100
     msg = (f"🏁 *TRADE CLOSED: {reason}*\n"
            f"💰 Exit Price: `${exit_price:.2f}`\n"
            f"💵 PnL: `{pnl_cash:+.2f} USDT`\n"
-           f"🏦 Balance: `${stats['balance']:.2f}`")
+           f"🏦 Balance: `${stats['balance']:.2f}`\n"
+           f"📈 Win Rate: `{win_rate:.1f}%` | 🔄 Trailed: `{stats['trailed_trades']}`")
     await bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
     active_trade = None
 
@@ -84,10 +119,8 @@ async def close_trade(exit_price, reason):
 
 async def main():
     global active_trade
-    # Subscribing to 5m stream for "repainting" every 5 mins
     uri = f"wss://stream.binance.com:9443/ws/{SYMBOL.lower()}@kline_{CHECK_INTERVAL}"
-    
-    print(f"Bot Started: Monitoring {SYMBOL} on 1H trend with 5M sync.")
+    print(f"Bot Active: {SYMBOL}")
     
     async with websockets.connect(uri) as ws:
         while True:
@@ -95,35 +128,21 @@ async def main():
                 data = json.loads(await ws.recv())
                 if 'k' in data:
                     price = float(data['k']['c'])
+                    if active_trade: await monitor_trade(price)
                     
-                    # 1. Live Price Monitoring for active trades
-                    if active_trade:
-                        await monitor_trade(price)
-                    
-                    # 2. Every 5 Minutes (Candle Close), Repaint/Sync Indicators
-                    if data['k']['x']:
+                    if data['k']['x'] and not active_trade:
                         rsi, rsi_ema, prsi, pema = await fetch_indicators()
-                        
-                        # Check for entry if no trade is open
-                        if rsi and not active_trade:
-                            # 1H Crossover Check (Repainted every 5 mins)
-                            if prsi <= pema and rsi > rsi_ema:
-                                resp = requests.get(f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={SIGNAL_TIMEFRAME}&limit=1").json()
-                                low_price = float(resp[0][3]) * 0.9995
-                                
-                                active_trade = {
-                                    'entry': price, 'initial_sl': low_price, 'sl': low_price,
-                                    'risk_usd': stats['balance'] * stats['risk_percent'],
-                                    'trail_level': 0
-                                }
-                                
-                                entry_msg = (f"🚀 *LONG SIGNAL (1H Trend)*\n"
-                                             f"📊 RSI ({rsi:.2f}) crossed EMA ({rsi_ema:.2f})\n"
-                                             f"💰 Entry: `${price:.2f}` | SL: `${low_price:.2f}`")
-                                await bot.send_message(CHAT_ID, entry_msg, parse_mode='Markdown')
-
+                        if rsi and prsi <= pema and rsi > rsi_ema:
+                            resp = requests.get(f"https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={SIGNAL_TIMEFRAME}&limit=1").json()
+                            low_price = float(resp[0][3]) * 0.9995
+                            active_trade = {
+                                'entry': price, 'initial_sl': low_price, 'sl': low_price,
+                                'risk_usd': stats['balance'] * stats['risk_percent'],
+                                'trail_level': 0
+                            }
+                            await bot.send_message(CHAT_ID, f"🚀 *LONG SIGNAL*\n💰 Entry: `${price:.2f}`\n🛑 SL: `${low_price:.2f}`", parse_mode='Markdown')
             except Exception as e:
-                print(f"Error in main loop: {e}")
+                print(f"Loop Error: {e}")
                 await asyncio.sleep(5)
 
 if __name__ == "__main__":
