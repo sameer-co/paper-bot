@@ -31,14 +31,13 @@ EMA_RSI_PERIOD = 9
 TELEGRAM_TOKEN = '8349229275:AAGNWV2A0_Pf9LhlwZCczeBoMcUaJL2shFg'
 CHAT_ID = '1950462171'
 
-# UPDATED STATS TO TRACK TRAILING SEPARATELY
 stats = {
     "balance": 100, 
     "risk_percent": 0.02,
     "total_trades": 0,
-    "wins_final_target": 0,   # Stage 3
-    "wins_trailed": 0,        # Stage 1 or 2 hit then exit
-    "losses": 0               # Initial SL hit
+    "wins_final_target": 0,   
+    "wins_trailed": 0,        
+    "losses": 0               
 }
 
 active_trade = None  
@@ -70,8 +69,18 @@ async def monitor_trade(price):
     reward_dist = price - active_trade['entry']
     rr_ratio = reward_dist / risk_dist if risk_dist > 0 else 0
 
-    # STAGE 1: Hit 1.5R -> Trail SL to 0.8R (100% position remains)
-    if not active_trade.get('stage1_hit') and rr_ratio >= 1.5:
+    # STAGE 0: Hit 1.0R -> Trail SL to -0.3R (New Stage)
+    if not active_trade.get('stage0_hit') and rr_ratio >= 1.0 and not active_trade.get('stage1_hit'):
+        active_trade['sl'] = active_trade['entry'] - (risk_dist * 0.3)
+        active_trade['stage0_hit'] = True
+        msg = (f"🛡️ *STAGE 0 REACHED (1.0R)*\n"
+               f"━━━━━━━━━━━━━━━━━━\n"
+               f"📉 Risk reduced! SL moved to -0.3R: `${active_trade['sl']:.2f}`\n"
+               f"💎 Running: 100% Position")
+        await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
+
+    # STAGE 1: Hit 1.5R -> Trail SL to 0.8R
+    elif not active_trade.get('stage1_hit') and rr_ratio >= 1.5:
         active_trade['sl'] = active_trade['entry'] + (risk_dist * 0.8)
         active_trade['stage1_hit'] = True
         msg = (f"⚡ *STAGE 1 REACHED (1.5R)*\n"
@@ -80,7 +89,7 @@ async def monitor_trade(price):
                f"💎 Running: 100% Position")
         await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
 
-    # STAGE 2: Hit 2.2R -> Trail SL to 1.3R (100% position remains)
+    # STAGE 2: Hit 2.2R -> Trail SL to 1.3R
     elif not active_trade.get('stage2_hit') and rr_ratio >= 2.2:
         active_trade['sl'] = active_trade['entry'] + (risk_dist * 1.3)
         active_trade['stage2_hit'] = True
@@ -96,20 +105,18 @@ async def monitor_trade(price):
     
     # EXIT ON STOP LOSS
     elif price <= active_trade['sl']:
-        reason = "🛡️ TRAILED SL HIT" if active_trade.get('stage1_hit') else "🛑 INITIAL SL HIT"
+        reason = "🛡️ TRAILED SL HIT" if active_trade.get('stage0_hit') else "🛑 INITIAL SL HIT"
         await close_trade(price, reason)
 
 async def close_trade(exit_price, reason):
     global active_trade, stats
     risk_usd = active_trade['risk_usd']
     
-    # Calculate actual PnL
     risk_dist = active_trade['entry'] - active_trade['initial_sl']
     reward_dist = exit_price - active_trade['entry']
     actual_rr = reward_dist / risk_dist
     pnl = risk_usd * actual_rr
     
-    # Update Stats
     if "FINAL TARGET" in reason:
         stats['wins_final_target'] += 1
     elif "TRAILED" in reason:
@@ -161,7 +168,7 @@ async def main():
                                     
                                     active_trade = {
                                         'entry': price, 'initial_sl': low_price, 'sl': low_price,
-                                        'risk_usd': risk_amount, 'stage1_hit': False, 'stage2_hit': False
+                                        'risk_usd': risk_amount, 'stage0_hit': False, 'stage1_hit': False, 'stage2_hit': False
                                     }
                                     
                                     entry_msg = (
