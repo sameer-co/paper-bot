@@ -32,12 +32,12 @@ TELEGRAM_TOKEN = '8349229275:AAGNWV2A0_Pf9LhlwZCczeBoMcUaJL2shFg'
 CHAT_ID = '1950462171'
 
 stats = {
-    "balance": 100, 
+    "balance": 59.91, 
     "risk_percent": 0.02,
-    "total_trades": 0,
-    "wins_final_target": 0,   
-    "wins_trailed": 0,        
-    "losses": 0               
+    "total_trades": 93,
+    "wins_final_target": 9,   
+    "wins_trailed": 21,        
+    "losses": 63               
 }
 
 active_trade = None  
